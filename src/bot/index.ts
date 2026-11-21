@@ -4,6 +4,40 @@ import http from 'node:http';
 import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { handleValueAutocomplete, handleValueCommand } from './command.js';
 import { syncSlashCommands } from './deploy-commands.js';
+import {
+  handleSearchButton,
+  handleSearchCommand,
+  handleSearchModalSubmit,
+  handleSearchSelectMenu,
+} from './searchTrade.js';
+import {
+  indexSingleMessage,
+  removeIndexedMessage,
+  syncTradesFromChannels,
+} from './tradeMatcher.js';
+import {
+  claimLocalLeadership,
+  confirmActiveLeadership,
+  INSTANCE_ID,
+  isSupersededLocally,
+  markStandbyOnConflict,
+  waitForLeadershipTurn,
+} from './leadership.js';
+import {
+  handleStickyAddCommand,
+  handleStickyMessageCreate,
+  handleStickyRemoveCommand,
+  loadStickyMessages,
+} from './stickyMessage.js';
+import {
+  handleWinLossButton,
+  handleWinLossCommand,
+  handleWinLossModalSubmit,
+} from './winLoss.js';
+
+// Claim local lockfile leadership and load saved sticky messages on startup
+claimLocalLeadership();
+loadStickyMessages();
 
 // Prefer IPv4 DNS resolution on cloud hosts (Railway, etc.)
 dns.setDefaultResultOrder('ipv4first');
@@ -15,16 +49,22 @@ if (!token) {
   process.exit(1);
 }
 
+// Enable GuildMessages + MessageContent so the bot can read and search trade messages
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
   rest: {
     timeout: 15000,
     retries: 2,
   },
 });
 
+// Sync slash commands and warm up the trading channels cache once ready
 client.once(Events.ClientReady, async (readyClient) => {
-  console.log(`Ready! Logged in as ${readyClient.user.tag}`);
+  console.log(`Ready! Logged in as ${readyClient.user.tag} (instance ${INSTANCE_ID})`);
 
   const clientId = process.env.DISCORD_CLIENT_ID || readyClient.application.id;
   if (token && clientId) {
@@ -41,25 +81,85 @@ client.once(Events.ClientReady, async (readyClient) => {
       console.error('Failed to sync slash commands on startup:', error);
     }
   }
+
+  // Warm up trade index in the background so /search trade responds fast
+  void syncTradesFromChannels(readyClient, true).then((count) => {
+    console.log(`Indexed ${count} messages from trading channels.`);
+  });
 });
 
+// Register commands and index channels whenever the bot joins a new server
 client.on(Events.GuildCreate, async (guild) => {
   const clientId = process.env.DISCORD_CLIENT_ID || client.application?.id;
   if (token && clientId && !process.env.DISCORD_GUILD_ID) {
     try {
       await syncSlashCommands(token, clientId, guild.id);
-      console.log(`Synced /value command to newly joined server "${guild.name}".`);
+      console.log(`Synced slash commands to newly joined server "${guild.name}".`);
     } catch (error) {
-      console.error(`Failed to sync /value to guild ${guild.id}:`, error);
+      console.error(`Failed to sync commands to guild ${guild.id}:`, error);
     }
+  }
+  void syncTradesFromChannels(client, true);
+});
+
+// Keep trade cache and sticky messages updated live as messages are posted
+client.on(Events.MessageCreate, (message) => {
+  indexSingleMessage(message);
+  handleStickyMessageCreate(message);
+});
+
+client.on(Events.MessageUpdate, async (_oldMsg, newMsg) => {
+  try {
+    const fetched = newMsg.partial ? await newMsg.fetch() : newMsg;
+    indexSingleMessage(fetched);
+  } catch {
+    // Ignore inaccessible edited messages
   }
 });
 
+client.on(Events.MessageDelete, (message) => {
+  removeIndexedMessage(message.id);
+});
+
+// Route slash commands, autocomplete, buttons, dropdowns, and modal forms
 client.on(Events.InteractionCreate, async (interaction) => {
+  if (isSupersededLocally()) return;
+
   try {
+    // Session-bound components run immediately if owned locally (non-owners delay inside handler)
+    if (interaction.isButton()) {
+      if (interaction.customId.startsWith('wl_calc:')) {
+        await handleWinLossButton(interaction);
+      } else {
+        await handleSearchButton(interaction);
+      }
+      confirmActiveLeadership();
+      return;
+    }
+
+    if (interaction.isStringSelectMenu()) {
+      await handleSearchSelectMenu(interaction);
+      confirmActiveLeadership();
+      return;
+    }
+
+    if (interaction.isModalSubmit()) {
+      if (interaction.customId.startsWith('wl_modal:')) {
+        await handleWinLossModalSubmit(interaction);
+      } else {
+        await handleSearchModalSubmit(interaction);
+      }
+      confirmActiveLeadership();
+      return;
+    }
+
+    // Unclaimed commands/autocomplete wait an age-based turn so the newest instance always wins
+    if (!(await waitForLeadershipTurn())) return;
+
     if (interaction.isAutocomplete()) {
       if (interaction.commandName === 'value') {
         await handleValueAutocomplete(interaction);
+        confirmActiveLeadership();
       }
       return;
     }
@@ -68,19 +168,43 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.commandName === 'value') {
       await handleValueCommand(interaction);
+      confirmActiveLeadership();
+    } else if (interaction.commandName === 'trade') {
+      await handleSearchCommand(interaction);
+      confirmActiveLeadership();
+    } else if (interaction.commandName === 'stickymessage') {
+      await handleStickyAddCommand(interaction);
+      confirmActiveLeadership();
+    } else if (interaction.commandName === 'stickmessage') {
+      await handleStickyRemoveCommand(interaction);
+      confirmActiveLeadership();
+    } else if (interaction.commandName === 'wl') {
+      await handleWinLossCommand(interaction);
+      confirmActiveLeadership();
     }
   } catch (error) {
+    const code = (error as { code?: number })?.code;
+    if (code === 40060 || code === 10062) {
+      // Another (newer) instance handled this interaction first; enter passive standby
+      markStandbyOnConflict();
+      return;
+    }
+
     console.error('Error handling interaction:', error);
     if (interaction.isRepliable()) {
       const reply = {
-        content: 'Something went wrong while checking that value.',
+        content: 'Something went wrong while running that action',
         flags: MessageFlags.Ephemeral,
       } as const;
 
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp(reply);
-      } else {
-        await interaction.reply(reply);
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp(reply);
+        } else {
+          await interaction.reply(reply);
+        }
+      } catch {
+        // Ignore follow-up errors on expired interactions
       }
     }
   }

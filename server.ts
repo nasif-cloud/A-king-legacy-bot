@@ -43,7 +43,7 @@ function appendLog(stream: BotLogEntry['stream'], raw: string): void {
       message: trimmed,
       timestamp,
     });
-    if (botLogs.length > 120) {
+    if (botLogs.length > 300) {
       botLogs.shift();
     }
   }

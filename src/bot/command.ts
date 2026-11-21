@@ -47,7 +47,7 @@ export async function handleValueCommand(
 
   if (!item) {
     await interaction.reply({
-      content: `Could not find **"${query}"** in the King Legacy value list. Try starting to type an item name to pick from autocomplete.`,
+      content: `Could not find **"${query}"** in the King Legacy value list, try starting to type an item name to pick from autocomplete`,
       flags: MessageFlags.Ephemeral,
     });
     return;
@@ -55,5 +55,6 @@ export async function handleValueCommand(
 
   await interaction.reply({
     content: formatValueResponse(item),
+    flags: MessageFlags.Ephemeral,
   });
 }

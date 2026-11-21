@@ -1,6 +1,9 @@
 import 'dotenv/config';
 import { REST, Routes } from 'discord.js';
 import { valueCommandData } from './command.js';
+import { searchCommandData } from './searchTrade.js';
+import { stickyAddCommandData, stickyRemoveCommandData } from './stickyMessage.js';
+import { winLossCommandData } from './winLoss.js';
 
 interface PartialGuild {
   id: string;
@@ -13,14 +16,20 @@ export async function syncSlashCommands(
   guildId?: string,
 ): Promise<string[]> {
   const rest = new REST().setToken(token);
-  const commands = [valueCommandData.toJSON()];
+  const commands = [
+    valueCommandData.toJSON(),
+    searchCommandData.toJSON(),
+    stickyAddCommandData.toJSON(),
+    stickyRemoveCommandData.toJSON(),
+    winLossCommandData.toJSON(),
+  ];
   const messages: string[] = [];
 
   if (guildId) {
     await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
       body: commands,
     });
-    messages.push(`Registered /value command to guild ${guildId}.`);
+    messages.push(`Registered /value, /trade, /stickymessage, /stickmessage, and /wl commands to guild ${guildId}.`);
     return messages;
   }
 
@@ -31,18 +40,18 @@ export async function syncSlashCommands(
       await rest.put(Routes.applicationGuildCommands(clientId, guild.id), {
         body: commands,
       });
-      messages.push(`Registered /value command to server "${guild.name}" (${guild.id}).`);
+      messages.push(`Registered /value, /trade, /stickymessage, /stickmessage, and /wl commands to server "${guild.name}" (${guild.id}).`);
     }
-    // Clear global commands to avoid duplicate /value entries or stale cached options
+    // Clear global commands to avoid duplicate entries or stale cached options
     await rest.put(Routes.applicationCommands(clientId), {
       body: [],
     });
-    messages.push('Cleared global command cache so static choices take effect immediately.');
+    messages.push('Cleared global command cache so guild commands take effect immediately.');
   } else {
     await rest.put(Routes.applicationCommands(clientId), {
       body: commands,
     });
-    messages.push('Registered /value command globally.');
+    messages.push('Registered /value, /trade, /stickymessage, /stickmessage, and /wl commands globally.');
   }
 
   return messages;
