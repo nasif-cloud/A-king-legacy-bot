@@ -25,9 +25,12 @@ import {
 } from './leadership.js';
 import {
   handleStickyAddCommand,
+  handleStickyMessageBulkDelete,
   handleStickyMessageCreate,
+  handleStickyMessageDelete,
   handleStickyRemoveCommand,
   loadStickyMessages,
+  reconcileStickyMessages,
 } from './stickyMessage.js';
 import {
   handleWinLossButton,
@@ -82,6 +85,9 @@ client.once(Events.ClientReady, async (readyClient) => {
     }
   }
 
+  // Immediately verify, recover, and repost sticky messages after any bot reset
+  void reconcileStickyMessages(readyClient);
+
   // Warm up trade index in the background so /search trade responds fast
   void syncTradesFromChannels(readyClient, true).then((count) => {
     console.log(`Indexed ${count} messages from trading channels.`);
@@ -100,6 +106,7 @@ client.on(Events.GuildCreate, async (guild) => {
     }
   }
   void syncTradesFromChannels(client, true);
+  void reconcileStickyMessages(client, guild.id);
 });
 
 // Keep trade cache and sticky messages updated live as messages are posted
@@ -119,6 +126,14 @@ client.on(Events.MessageUpdate, async (_oldMsg, newMsg) => {
 
 client.on(Events.MessageDelete, (message) => {
   removeIndexedMessage(message.id);
+  handleStickyMessageDelete(message);
+});
+
+client.on(Events.MessageBulkDelete, (messages) => {
+  for (const id of messages.keys()) {
+    removeIndexedMessage(id);
+  }
+  handleStickyMessageBulkDelete(messages);
 });
 
 // Route slash commands, autocomplete, buttons, dropdowns, and modal forms
@@ -228,6 +243,11 @@ client.on(Events.ShardDisconnect, (event, shardId) => {
 
 client.on(Events.ShardReconnecting, (shardId) => {
   console.log(`[Discord Shard ${shardId}] Reconnecting...`);
+});
+
+client.on(Events.ShardResume, (shardId) => {
+  console.log(`[Discord Shard ${shardId}] Resumed; reconciling sticky messages...`);
+  void reconcileStickyMessages(client);
 });
 
 // Lightweight health server if run standalone with PORT set
