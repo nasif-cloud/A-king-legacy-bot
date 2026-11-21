@@ -1,9 +1,10 @@
 import 'dotenv/config';
+import http from 'node:http';
 import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { handleValueAutocomplete, handleValueCommand } from './command.js';
 import { syncSlashCommands } from './deploy-commands.js';
 
-const token = process.env.DISCORD_TOKEN;
+const token = process.env.DISCORD_TOKEN?.trim();
 
 if (!token) {
   console.error('Missing DISCORD_TOKEN in environment variables.');
@@ -76,4 +77,34 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-client.login(token);
+client.on(Events.Error, (error) => {
+  console.error('Discord client error:', error);
+});
+
+const shouldStartHealthServer =
+  !process.env.BOT_MANAGED_BY_SERVER &&
+  Boolean(process.env.PORT || process.env.RENDER);
+
+if (shouldStartHealthServer) {
+  const port = Number(process.env.PORT) || 3000;
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        bot: client.user?.tag ?? 'connecting',
+        ready: client.isReady(),
+      }),
+    );
+  });
+
+  server.listen(port, '0.0.0.0', () => {
+    console.log(`Health check server listening on 0.0.0.0:${port}`);
+  });
+}
+
+console.log('Connecting to Discord Gateway...');
+client.login(token).catch((error) => {
+  console.error('Failed to log in to Discord:', error);
+  process.exit(1);
+});

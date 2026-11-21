@@ -164,7 +164,7 @@ async function startBotProcess(): Promise<{ ok: boolean; running: boolean; outpu
 
   const child = spawn(process.execPath, [TSX_CLI, BOT_SCRIPT], {
     cwd: ROOT_DIR,
-    env: process.env,
+    env: { ...process.env, BOT_MANAGED_BY_SERVER: '1' },
     shell: false,
   });
 
@@ -247,6 +247,10 @@ async function createServer() {
   const httpServer = http.createServer(app);
   app.use(express.json({ limit: '16kb' }));
 
+  app.get('/health', (_req, res) => {
+    res.json({ ok: true, running: isBotRunning() });
+  });
+
   app.get('/api/bot/status', (_req, res) => {
     res.json({
       running: isBotRunning(),
@@ -320,10 +324,17 @@ async function createServer() {
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(ROOT_DIR, 'dist');
-    app.use(express.static(distDir));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
-    });
+    const indexHtml = path.join(distDir, 'index.html');
+    if (fs.existsSync(indexHtml)) {
+      app.use(express.static(distDir));
+      app.get('*', (_req, res) => {
+        res.sendFile(indexHtml);
+      });
+    } else {
+      app.get('*', (_req, res) => {
+        res.json({ ok: true, status: 'King Legacy bot server is running', running: isBotRunning() });
+      });
+    }
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
