@@ -1,0 +1,6 @@
+{
+  "name": "King Legacy Value Bot",
+  "description": "Minimal Discord slash-command bot (/value) and interactive command tester for King Legacy Sea King Fin fruit values.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
