@@ -5,11 +5,6 @@ import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import {
-  handleHttpInteraction,
-  verifyDiscordSignature,
-} from './src/bot/interactions.ts';
-import type { DiscordHttpInteractionPayload } from './src/bot/interactions.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 const ROOT_DIR = process.cwd();
@@ -250,39 +245,6 @@ function stopBotProcess(): { ok: boolean; running: boolean; output: string } {
 async function createServer() {
   const app = express();
   const httpServer = http.createServer(app);
-
-  app.post(
-    ['/interactions', '/api/interactions'],
-    express.raw({ type: 'application/json', limit: '256kb' }),
-    (req, res) => {
-      const publicKey = process.env.DISCORD_PUBLIC_KEY?.trim() || '';
-      if (!publicKey) {
-        res.status(503).json({ error: 'DISCORD_PUBLIC_KEY is not configured.' });
-        return;
-      }
-
-      const rawBody = Buffer.isBuffer(req.body)
-        ? req.body
-        : Buffer.from(typeof req.body === 'string' ? req.body : '', 'utf8');
-      const signature = String(req.headers['x-signature-ed25519'] ?? '');
-      const timestamp = String(req.headers['x-signature-timestamp'] ?? '');
-
-      if (!verifyDiscordSignature(rawBody, signature, timestamp, publicKey)) {
-        res.status(401).send('Invalid request signature');
-        return;
-      }
-
-      try {
-        const payload = JSON.parse(
-          rawBody.toString('utf8'),
-        ) as DiscordHttpInteractionPayload;
-        res.json(handleHttpInteraction(payload));
-      } catch {
-        res.status(400).json({ error: 'Bad interaction payload' });
-      }
-    },
-  );
-
   app.use(express.json({ limit: '16kb' }));
 
   app.get('/health', (_req, res) => {
