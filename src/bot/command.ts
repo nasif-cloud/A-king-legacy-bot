@@ -55,6 +55,5 @@ export async function handleValueCommand(
 
   await interaction.reply({
     content: formatValueResponse(item),
-    flags: MessageFlags.Ephemeral,
   });
 }
