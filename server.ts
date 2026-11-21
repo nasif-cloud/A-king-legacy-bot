@@ -6,7 +6,7 @@ import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const ROOT_DIR = process.cwd();
 const TSX_CLI = path.resolve(ROOT_DIR, 'node_modules/tsx/dist/cli.mjs');
 const DEPLOY_SCRIPT = path.resolve(ROOT_DIR, 'src/bot/deploy-commands.ts');
