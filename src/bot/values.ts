@@ -267,8 +267,8 @@ export const KING_LEGACY_ITEMS: KingLegacyItem[] = [
   {
     "id": "cerulean_blossom",
     "name": "Cerulean Blossom",
-    "emoji": "<:cerulean_blossom:1573525748894015716>",
-    "emojiId": "1573525748894015716",
+    "emoji": "<:CeruleanBlossom:1573516760747999272>",
+    "emojiId": "1573516760747999272",
     "value": 1800,
     "aliases": [
       "cerulean blossom",
