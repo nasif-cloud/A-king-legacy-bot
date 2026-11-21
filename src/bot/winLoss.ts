@@ -1,4 +1,7 @@
-import { createCanvas, loadImage, type Image } from '@napi-rs/canvas';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createCanvas, GlobalFonts, loadImage, type Image } from '@napi-rs/canvas';
 import {
   ActionRowBuilder,
   AttachmentBuilder,
@@ -53,6 +56,40 @@ interface WinLossSession {
 const wlSessions = new Map<string, WinLossSession>();
 let cachedFinImage: Image | null = null;
 const avatarCache = new Map<string, Image>();
+
+const BADGE_FONT_FAMILY = 'KingLegacyBadge';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Registers a bundled bold TTF font with Skia so badge text renders even in minimal Linux containers with no system fonts
+function ensureBadgeFontRegistered(): string {
+  if (GlobalFonts.has(BADGE_FONT_FAMILY)) {
+    return BADGE_FONT_FAMILY;
+  }
+
+  const fontCandidates = [
+    path.resolve(__dirname, 'fonts', 'NotoSans-Bold.ttf'),
+    path.resolve(process.cwd(), 'src', 'bot', 'fonts', 'NotoSans-Bold.ttf'),
+    '/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf',
+    '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+    '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+  ];
+
+  for (const fontPath of fontCandidates) {
+    try {
+      if (fs.existsSync(fontPath)) {
+        const registered = GlobalFonts.registerFromPath(fontPath, BADGE_FONT_FAMILY);
+        if (registered || GlobalFonts.has(BADGE_FONT_FAMILY)) {
+          return BADGE_FONT_FAMILY;
+        }
+      }
+    } catch {
+      // Try next font candidate
+    }
+  }
+
+  return 'Noto Sans';
+}
 
 // Slash command: /wl (Win or Loss Calculator)
 export const winLossCommandData = new SlashCommandBuilder()
@@ -280,11 +317,22 @@ async function getUserAvatarImage(avatarUrl: string | null): Promise<Image | nul
   }
 }
 
+// Returns true when the trade difference is 0% or within 10% (fair trade)
+function isFairTradeDifference(youTotal: number, themTotal: number): boolean {
+  const absDiff = Math.abs(themTotal - youTotal);
+  if (absDiff === 0) return true;
+  const maxSide = Math.max(youTotal, themTotal);
+  if (maxSide <= 0) return true;
+  const pctDiff = (absDiff / maxSide) * 100;
+  return pctDiff <= 10 + 1e-9;
+}
+
 // Draws the Sea King Fin over the user's PFP + 6-color 20% gradient, with a top-right value badge
 export async function drawFinDeltaThumbnail(
   amount: number,
   sign: '-' | '+' | 'fair',
   avatarUrl: string | null,
+  isFair = sign === 'fair',
 ): Promise<Buffer> {
   const size = 300;
   const canvas = createCanvas(size, size);
@@ -303,13 +351,12 @@ export async function drawFinDeltaThumbnail(
   }
 
   // 2) 6-color red/green/blue gradient overlay at 20% opacity
-  if (amount > 0 || sign === 'fair') {
-    const stops =
-      sign === 'fair'
-        ? ['#eff6ff', '#dbeafe', '#93c5fd', '#60a5fa', '#3b82f6', '#1d4ed8']
-        : sign === '+'
-          ? ['#f0fdf4', '#bbf7d0', '#86efac', '#4ade80', '#22c55e', '#15803d']
-          : ['#fff1f2', '#fecdd3', '#fda4af', '#fb7185', '#ef4444', '#b91c1c'];
+  if (amount > 0 || isFair) {
+    const stops = isFair
+      ? ['#eff6ff', '#dbeafe', '#93c5fd', '#60a5fa', '#3b82f6', '#1d4ed8']
+      : sign === '+'
+        ? ['#f0fdf4', '#bbf7d0', '#86efac', '#4ade80', '#22c55e', '#15803d']
+        : ['#fff1f2', '#fecdd3', '#fda4af', '#fb7185', '#ef4444', '#b91c1c'];
 
     const grad = ctx.createLinearGradient(0, 0, size, size);
     stops.forEach((color, idx) => {
@@ -344,21 +391,21 @@ export async function drawFinDeltaThumbnail(
   if (label.length >= 6) fontSize = 38;
   if (label.length >= 8) fontSize = 32;
 
-  ctx.font = `bold ${fontSize}px "Noto Sans", "DejaVu Sans", "Liberation Sans", sans-serif`;
+  const fontFamily = ensureBadgeFontRegistered();
+  ctx.font = `bold ${fontSize}px "${fontFamily}", "Noto Sans", "DejaVu Sans", "Liberation Sans", sans-serif`;
   const textWidth = ctx.measureText(label).width;
   const pillWidth = Math.min(size - 32, Math.max(150, textWidth + 46));
   const pillHeight = 88;
   const pillX = size - pillWidth - 16;
   const pillY = 18;
 
-  ctx.fillStyle =
-    sign === 'fair'
-      ? '#60a5fa'
-      : amount === 0
-        ? '#cbd5e1'
-        : sign === '+'
-          ? '#4ade80'
-          : '#ff5a54';
+  ctx.fillStyle = isFair
+    ? '#60a5fa'
+    : amount === 0
+      ? '#cbd5e1'
+      : sign === '+'
+        ? '#4ade80'
+        : '#ff5a54';
   ctx.beginPath();
   ctx.roundRect(pillX, pillY, pillWidth, pillHeight, 18);
   ctx.fill();
@@ -422,18 +469,19 @@ function buildWinLossResultContainer(
   themTotal: number,
 ): ContainerBuilder {
   const diff = Math.round((themTotal - youTotal) * 100) / 100;
-  const isFair = diff === 0;
+  const absDiff = Math.abs(diff);
+  const isFair = isFairTradeDifference(youTotal, themTotal);
   let resultLine: string;
-  if (diff > 0) {
+  if (isFair) {
+    resultLine = `Result: It's a **fair trade** (**${formatFinAmount(absDiff)}** ${SEA_KING_FIN_EMOJI} difference)`;
+  } else if (diff > 0) {
     resultLine = `Result: You're **winning** by **${formatFinAmount(diff)}** ${SEA_KING_FIN_EMOJI}`;
-  } else if (diff < 0) {
-    resultLine = `Result: You're **losing** by **${formatFinAmount(Math.abs(diff))}** ${SEA_KING_FIN_EMOJI}`;
   } else {
-    resultLine = `Result: It's a **fair trade** (**0** ${SEA_KING_FIN_EMOJI} difference)`;
+    resultLine = `Result: You're **losing** by **${formatFinAmount(absDiff)}** ${SEA_KING_FIN_EMOJI}`;
   }
 
   const container = new ContainerBuilder().setAccentColor(
-    diff > 0 ? WIN_ACCENT_COLOR : diff < 0 ? LOSS_ACCENT_COLOR : FAIR_ACCENT_COLOR,
+    isFair ? FAIR_ACCENT_COLOR : diff > 0 ? WIN_ACCENT_COLOR : LOSS_ACCENT_COLOR,
   );
 
   const youHeader = isFair
@@ -630,12 +678,16 @@ export async function handleWinLossModalSubmit(
 
   const diff = Math.round((theirParsed.totalValue - yourParsed.totalValue) * 100) / 100;
   const absDiff = Math.abs(diff);
+  const isFair = isFairTradeDifference(
+    yourParsed.totalValue,
+    theirParsed.totalValue,
+  );
   const youSign: '-' | '+' | 'fair' = diff === 0 ? 'fair' : diff > 0 ? '+' : '-';
   const themSign: '-' | '+' | 'fair' = diff === 0 ? 'fair' : diff > 0 ? '-' : '+';
 
   const [youPng, themPng] = await Promise.all([
-    drawFinDeltaThumbnail(absDiff, youSign, userAvatarUrl),
-    drawFinDeltaThumbnail(absDiff, themSign, botAvatarUrl),
+    drawFinDeltaThumbnail(absDiff, youSign, userAvatarUrl, isFair),
+    drawFinDeltaThumbnail(absDiff, themSign, botAvatarUrl, isFair),
   ]);
 
   const youIcons = formatTradeSideIcons(yourParsed.items);
