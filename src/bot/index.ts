@@ -191,7 +191,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId.startsWith('wl_calc:')) {
         await handleWinLossButton(interaction);
       } else if (interaction.customId.startsWith('stk_ping_btn:')) {
-        if (!(await waitForLeadershipTurn())) return;
         await handleStockPingsButton(interaction);
       } else {
         await handleSearchButton(interaction);
@@ -202,10 +201,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId.startsWith('stk_ping_fruit:')) {
-        if (!(await waitForLeadershipTurn())) return;
         await handleStockPingsFruitSelect(interaction);
       } else if (interaction.customId.startsWith('stk_menu:')) {
-        if (!(await waitForLeadershipTurn())) return;
         await handleStockSelectMenu(interaction);
       } else {
         await handleSearchSelectMenu(interaction);
@@ -216,7 +213,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (interaction.isRoleSelectMenu()) {
       if (interaction.customId.startsWith('stk_ping_role:')) {
-        if (!(await waitForLeadershipTurn())) return;
         await handleStockPingsRoleSelect(interaction);
       }
       confirmActiveLeadership();
@@ -227,7 +223,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       if (interaction.customId.startsWith('wl_modal:')) {
         await handleWinLossModalSubmit(interaction);
       } else if (interaction.customId.startsWith('stk_modal:')) {
-        if (!(await waitForLeadershipTurn())) return;
         await handleStockModalSubmit(interaction);
       } else {
         await handleSearchModalSubmit(interaction);
@@ -273,9 +268,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   } catch (error) {
     const code = (error as { code?: number })?.code;
-    if (code === 40060 || code === 10062) {
+    if (code === 40060) {
       // Another (newer) instance handled this interaction first; enter passive standby
       markStandbyOnConflict();
+      return;
+    }
+    if (code === 10062) {
+      console.warn(
+        `[Interaction] Timed out before ACK (10062) on ${
+          'customId' in interaction ? interaction.customId : interaction.type
+        }`,
+      );
       return;
     }
 

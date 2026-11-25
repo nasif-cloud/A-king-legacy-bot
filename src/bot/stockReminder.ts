@@ -1931,7 +1931,8 @@ async function ensureMainStockInputPermission(
   if (interaction.user.id === BOT_OWNER_ID) return true;
   if (memberHasRole(interaction, MAIN_INPUT_ROLE_ID)) return true;
 
-  if (interaction.guild) {
+  // Discord always includes member.roles on guild interactions; only fetch if member payload is absent
+  if (!interaction.member && interaction.guild) {
     const member = await interaction.guild.members
       .fetch(interaction.user.id)
       .catch(() => null);
@@ -2127,6 +2128,7 @@ function resolveActiveMainInteraction(
   }
 
   // If the channel config was wiped on an ephemeral reset, recover it right from the interaction
+  let changed = false;
   if (!config || !config.isMain) {
     const guildId = interaction.guildId ?? msg?.guildId ?? null;
     if (!guildId) return null;
@@ -2139,6 +2141,7 @@ function resolveActiveMainInteraction(
       updatedAt: Date.now(),
     };
     stockStore.set(channelId, config);
+    changed = true;
   }
 
   // If this embed was explicitly replaced by a newer /stockset post in the same channel, reject old message
@@ -2148,27 +2151,33 @@ function resolveActiveMainInteraction(
         return null;
       }
       config.activeMessageId = msgId;
+      changed = true;
     } catch {
       return null;
     }
   } else if (!config.activeMessageId && msgId) {
     config.activeMessageId = msgId;
+    changed = true;
   }
 
   // Bring globalStock in sync if disk state was stale or wiped
   if (globalStock.cycleStartMs !== currentBounds.cycleStartMs) {
     globalStock.cycleStartMs = currentBounds.cycleStartMs;
     globalStock.nextRefreshMs = currentBounds.nextRefreshMs;
+    changed = true;
   }
   if (globalStock.fruits.length === 0 && msg) {
     const extracted = extractStockStateFromMessage(msg, interaction.client.user?.id);
     if (extracted && extracted.fruits.length > 0) {
       globalStock.fruits = [...extracted.fruits];
+      changed = true;
     }
   }
 
-  saveStockConfigs();
-  ensureStockWatchdog(interaction.client);
+  if (changed) {
+    saveStockConfigs();
+    ensureStockWatchdog(interaction.client);
+  }
   return config;
 }
 
