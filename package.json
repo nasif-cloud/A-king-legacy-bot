@@ -13,6 +13,9 @@
     "bot:deploy": "tsx src/bot/deploy-commands.ts",
     "bot:start": "tsx src/bot/index.ts"
   },
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@google/genai": "^2.4.0",
     "@napi-rs/canvas": "^1.2.0",

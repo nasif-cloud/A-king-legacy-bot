@@ -1221,17 +1221,100 @@ async function buildPayloadForChannel(
   };
 }
 
+function serializeComponentNode(node: unknown): Record<string, unknown> {
+  const raw =
+    node &&
+    typeof node === 'object' &&
+    'toJSON' in node &&
+    typeof (node as { toJSON?: () => unknown }).toJSON === 'function'
+      ? ((node as { toJSON: () => unknown }).toJSON() as Record<string, unknown>)
+      : (node as Record<string, unknown>);
+  return JSON.parse(JSON.stringify(raw)) as Record<string, unknown>;
+}
+
+// Builds an expired edit payload from the message's own components so old stock embeds stay intact
+export function buildExpiredPayloadFromMessage(message: {
+  components?: unknown[];
+}): MessageEditOptions | null {
+  const rawComponents = Array.isArray(message.components) ? message.components : [];
+  if (rawComponents.length === 0) return null;
+
+  const cloned = rawComponents.map((comp) => serializeComponentNode(comp));
+  let hasExpiredFooter = false;
+
+  const walkAndFreeze = (node: Record<string, unknown>): void => {
+    const type = typeof node.type === 'number' ? node.type : undefined;
+
+    if (typeof node.content === 'string') {
+      if (node.content.replace(STOCK_MARKER_REGEX, '').trim() === '-# expired') {
+        hasExpiredFooter = true;
+      }
+    }
+
+    const customId =
+      typeof node.custom_id === 'string'
+        ? node.custom_id
+        : typeof node.customId === 'string'
+          ? node.customId
+          : null;
+    if (
+      customId &&
+      customId.startsWith('stk_menu:') &&
+      (type === undefined || type === ComponentType.StringSelect)
+    ) {
+      node.disabled = true;
+    }
+
+    if (Array.isArray(node.components)) {
+      for (const child of node.components) {
+        if (child && typeof child === 'object') {
+          walkAndFreeze(child as Record<string, unknown>);
+        }
+      }
+    }
+  };
+
+  for (const node of cloned) {
+    walkAndFreeze(node);
+  }
+
+  if (!hasExpiredFooter) {
+    const expiredText = {
+      type: ComponentType.TextDisplay,
+      content: '-# expired',
+    };
+    const containerNode = cloned.find(
+      (n) => n.type === ComponentType.Container && Array.isArray(n.components),
+    );
+    if (containerNode && Array.isArray(containerNode.components)) {
+      containerNode.components.push(expiredText);
+    } else {
+      cloned.push(expiredText);
+    }
+  }
+
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: cloned as unknown as MessageEditOptions['components'],
+    allowedMentions: { parse: [], roles: [], users: [] },
+  };
+}
+
 async function expireStockMessageIfPresent(
   client: Client,
   config: StockChannelConfig,
 ): Promise<void> {
   if (!config.activeMessageId) return;
-  const { channel, payload } = await buildPayloadForChannel(client, config, true);
+  const channel = await resolveSendableChannel(client, config.channelId);
   if (!channel) return;
 
   try {
     const msg = await channel.messages.fetch(config.activeMessageId).catch(() => null);
     if (!msg || !msg.editable) return;
+
+    const payload = buildExpiredPayloadFromMessage(msg);
+    if (!payload) return;
+
     await msg.edit(payload);
   } catch (error) {
     console.warn(
@@ -1472,6 +1555,11 @@ async function adoptOrEnsureChannelStockMessage(
         const extracted = extractStockStateFromMessage(existing, client.user?.id);
         // Never expire an active in-cycle embed after restart
         if (extracted && extracted.cycleStartMs === globalStock.cycleStartMs) {
+          if (config.isMain && globalStock.fruits.length === 0 && extracted.fruits.length > 0) {
+            globalStock.fruits = [...extracted.fruits];
+            globalStock.updatedAt = Date.now();
+            saveStockConfigs();
+          }
           return;
         }
       }
@@ -1489,6 +1577,10 @@ async function adoptOrEnsureChannelStockMessage(
         if (extracted && extracted.cycleStartMs === globalStock.cycleStartMs) {
           config.activeMessageId = msg.id;
           config.updatedAt = Date.now();
+          if (config.isMain && globalStock.fruits.length === 0 && extracted.fruits.length > 0) {
+            globalStock.fruits = [...extracted.fruits];
+            globalStock.updatedAt = Date.now();
+          }
           saveStockConfigs();
           return;
         }
