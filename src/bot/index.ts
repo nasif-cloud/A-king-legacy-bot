@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import dns from 'node:dns';
 import http from 'node:http';
-import { Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
+import { ActivityType, Client, Events, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { handleValueAutocomplete, handleValueCommand } from './command.js';
 import { syncSlashCommands } from './deploy-commands.js';
 import {
@@ -37,10 +37,24 @@ import {
   handleWinLossCommand,
   handleWinLossModalSubmit,
 } from './winLoss.js';
+import {
+  handleStockModalSubmit,
+  handleStockPingsButton,
+  handleStockPingsCommand,
+  handleStockPingsFruitSelect,
+  handleStockPingsRoleSelect,
+  handleStockSelectMenu,
+  handleStockSetCommand,
+  initStockSchedules,
+  loadStockConfigs,
+  reconcileStockChannels,
+  syncMissingFruitEmojis,
+} from './stockReminder.js';
 
-// Claim local lockfile leadership and load saved sticky messages on startup
+// Claim local lockfile leadership and load saved sticky messages & stock configs on startup
 claimLocalLeadership();
 loadStickyMessages();
+loadStockConfigs();
 
 // Prefer IPv4 DNS resolution on cloud hosts (Railway, etc.)
 dns.setDefaultResultOrder('ipv4first');
@@ -65,9 +79,27 @@ const client = new Client({
   },
 });
 
+// Updates the bot's Discord status to "in <amount> servers"
+function updateBotPresence(targetClient: Client): void {
+  if (!targetClient.user) return;
+  const serverCount = targetClient.guilds.cache.size;
+  const statusText = `in ${serverCount} ${serverCount === 1 ? 'server' : 'servers'}`;
+  targetClient.user.setPresence({
+    status: 'online',
+    activities: [
+      {
+        name: statusText,
+        state: statusText,
+        type: ActivityType.Custom,
+      },
+    ],
+  });
+}
+
 // Sync slash commands and warm up the trading channels cache once ready
 client.once(Events.ClientReady, async (readyClient) => {
   console.log(`Ready! Logged in as ${readyClient.user.tag} (instance ${INSTANCE_ID})`);
+  updateBotPresence(readyClient);
 
   const clientId = process.env.DISCORD_CLIENT_ID || readyClient.application.id;
   if (token && clientId) {
@@ -88,6 +120,13 @@ client.once(Events.ClientReady, async (readyClient) => {
   // Immediately verify, recover, and repost sticky messages after any bot reset
   void reconcileStickyMessages(readyClient);
 
+  // Sync missing fruit application emojis, then recover & schedule 6-hour stock channels
+  void syncMissingFruitEmojis(readyClient)
+    .catch((error) => console.error('[Stock] Emoji sync failed:', error))
+    .finally(() => {
+      void initStockSchedules(readyClient);
+    });
+
   // Warm up trade index in the background so /search trade responds fast
   void syncTradesFromChannels(readyClient, true).then((count) => {
     console.log(`Indexed ${count} messages from trading channels.`);
@@ -96,6 +135,7 @@ client.once(Events.ClientReady, async (readyClient) => {
 
 // Register commands and index channels whenever the bot joins a new server
 client.on(Events.GuildCreate, async (guild) => {
+  updateBotPresence(client);
   const clientId = process.env.DISCORD_CLIENT_ID || client.application?.id;
   if (token && clientId && !process.env.DISCORD_GUILD_ID) {
     try {
@@ -107,6 +147,11 @@ client.on(Events.GuildCreate, async (guild) => {
   }
   void syncTradesFromChannels(client, true);
   void reconcileStickyMessages(client, guild.id);
+  void reconcileStockChannels(client, guild.id);
+});
+
+client.on(Events.GuildDelete, () => {
+  updateBotPresence(client);
 });
 
 // Keep trade cache and sticky messages updated live as messages are posted
@@ -145,6 +190,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isButton()) {
       if (interaction.customId.startsWith('wl_calc:')) {
         await handleWinLossButton(interaction);
+      } else if (interaction.customId.startsWith('stk_ping_btn:')) {
+        await handleStockPingsButton(interaction);
       } else {
         await handleSearchButton(interaction);
       }
@@ -153,7 +200,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu()) {
-      await handleSearchSelectMenu(interaction);
+      if (interaction.customId.startsWith('stk_ping_fruit:')) {
+        await handleStockPingsFruitSelect(interaction);
+      } else if (interaction.customId.startsWith('stk_menu:')) {
+        await handleStockSelectMenu(interaction);
+      } else {
+        await handleSearchSelectMenu(interaction);
+      }
+      confirmActiveLeadership();
+      return;
+    }
+
+    if (interaction.isRoleSelectMenu()) {
+      if (interaction.customId.startsWith('stk_ping_role:')) {
+        await handleStockPingsRoleSelect(interaction);
+      }
       confirmActiveLeadership();
       return;
     }
@@ -161,6 +222,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith('wl_modal:')) {
         await handleWinLossModalSubmit(interaction);
+      } else if (interaction.customId.startsWith('stk_modal:')) {
+        await handleStockModalSubmit(interaction);
       } else {
         await handleSearchModalSubmit(interaction);
       }
@@ -195,6 +258,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
       confirmActiveLeadership();
     } else if (interaction.commandName === 'wl') {
       await handleWinLossCommand(interaction);
+      confirmActiveLeadership();
+    } else if (interaction.commandName === 'stockset') {
+      await handleStockSetCommand(interaction);
+      confirmActiveLeadership();
+    } else if (interaction.commandName === 'stockpings') {
+      await handleStockPingsCommand(interaction);
       confirmActiveLeadership();
     }
   } catch (error) {
@@ -246,8 +315,14 @@ client.on(Events.ShardReconnecting, (shardId) => {
 });
 
 client.on(Events.ShardResume, (shardId) => {
-  console.log(`[Discord Shard ${shardId}] Resumed; reconciling sticky messages...`);
+  console.log(`[Discord Shard ${shardId}] Resumed; reconciling sticky & stock messages...`);
+  updateBotPresence(client);
   void reconcileStickyMessages(client);
+  void syncMissingFruitEmojis(client)
+    .catch((error) => console.error('[Stock] Emoji sync failed on resume:', error))
+    .finally(() => {
+      void initStockSchedules(client);
+    });
 });
 
 // Lightweight health server if run standalone with PORT set

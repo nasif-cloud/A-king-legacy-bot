@@ -3,6 +3,7 @@ import { REST, Routes } from 'discord.js';
 import { valueCommandData } from './command.js';
 import { searchCommandData } from './searchTrade.js';
 import { stickyAddCommandData, stickyRemoveCommandData } from './stickyMessage.js';
+import { stockPingsCommandData, stockSetCommandData } from './stockReminder.js';
 import { winLossCommandData } from './winLoss.js';
 
 interface PartialGuild {
@@ -22,6 +23,8 @@ export async function syncSlashCommands(
     stickyAddCommandData.toJSON(),
     stickyRemoveCommandData.toJSON(),
     winLossCommandData.toJSON(),
+    stockSetCommandData.toJSON(),
+    stockPingsCommandData.toJSON(),
   ];
   const messages: string[] = [];
 
@@ -29,7 +32,7 @@ export async function syncSlashCommands(
     await rest.put(Routes.applicationGuildCommands(clientId, guildId), {
       body: commands,
     });
-    messages.push(`Registered /value, /trade, /stickymessage, /stickmessage, and /wl commands to guild ${guildId}.`);
+    messages.push(`Registered /value, /trade, /stickymessage, /stickmessage, /wl, /stockset, and /stockpings commands to guild ${guildId}.`);
     return messages;
   }
 
@@ -40,7 +43,7 @@ export async function syncSlashCommands(
       await rest.put(Routes.applicationGuildCommands(clientId, guild.id), {
         body: commands,
       });
-      messages.push(`Registered /value, /trade, /stickymessage, /stickmessage, and /wl commands to server "${guild.name}" (${guild.id}).`);
+      messages.push(`Registered /value, /trade, /stickymessage, /stickmessage, /wl, /stockset, and /stockpings commands to server "${guild.name}" (${guild.id}).`);
     }
     // Clear global commands to avoid duplicate entries or stale cached options
     await rest.put(Routes.applicationCommands(clientId), {
@@ -51,7 +54,7 @@ export async function syncSlashCommands(
     await rest.put(Routes.applicationCommands(clientId), {
       body: commands,
     });
-    messages.push('Registered /value, /trade, /stickymessage, /stickmessage, and /wl commands globally.');
+    messages.push('Registered /value, /trade, /stickymessage, /stickmessage, /wl, /stockset, and /stockpings commands globally.');
   }
 
   return messages;
