@@ -44,6 +44,10 @@ const MONEY_EMOJI = '<:money:1574942498298527754>';
 const REFRESH_EMOJI = '<:refresh:1574960277563379823>';
 const PLUS_EMOJI = { id: '1574961306786861066', name: 'plus' };
 const MINUS_EMOJI = { id: '1574961321974300795', name: 'minus' };
+export const STOCK_VOTE_REACTIONS = [
+  '<:Win:1573737872647786508>',
+  '<:loss:1573737870999421058>',
+] as const;
 
 // Invisible zero-width markers used to recover configured stock channels & state after ephemeral disk resets
 const STOCK_MARKER_MAIN = '\u200b\u200c\u200e\u200c';
@@ -1324,6 +1328,53 @@ async function expireStockMessageIfPresent(
   }
 }
 
+// Adds <:Win:...> and <:loss:...> reactions when fruits are set, or clears bot's own vote reactions if stock is emptied
+export async function syncStockMessageReactions(
+  message: Message | null | undefined,
+  hasFruits = globalStock.fruits.length > 0,
+): Promise<void> {
+  if (!message) return;
+
+  if (message.inGuild()) {
+    const me =
+      message.guild.members.me ??
+      (await message.guild.members.fetchMe().catch(() => null));
+    const perms = me ? message.channel.permissionsFor(me) : null;
+    if (perms && !perms.has(PermissionsBitField.Flags.AddReactions)) {
+      return;
+    }
+  }
+
+  if (hasFruits) {
+    for (const emojiTag of STOCK_VOTE_REACTIONS) {
+      const parsed = parseDiscordEmoji(emojiTag);
+      const existing = parsed ? message.reactions.cache.get(parsed.id) : undefined;
+      if (existing?.me) continue;
+
+      try {
+        await message.react(emojiTag);
+      } catch (error) {
+        console.warn(
+          `[Stock] Could not add reaction ${emojiTag} on message ${message.id}:`,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+    return;
+  }
+
+  // If all fruits were removed back to 0, remove the bot's own vote reactions if present
+  const botId = message.client.user?.id;
+  if (!botId) return;
+  for (const emojiTag of STOCK_VOTE_REACTIONS) {
+    const parsed = parseDiscordEmoji(emojiTag);
+    const existing = parsed ? message.reactions.cache.get(parsed.id) : undefined;
+    if (existing?.me) {
+      await existing.users.remove(botId).catch(() => null);
+    }
+  }
+}
+
 async function postFreshStockMessage(
   client: Client,
   config: StockChannelConfig,
@@ -1335,6 +1386,9 @@ async function postFreshStockMessage(
   config.activeMessageId = sent.id;
   config.updatedAt = Date.now();
   saveStockConfigs();
+  if (globalStock.fruits.length > 0) {
+    void syncStockMessageReactions(sent, true);
+  }
   return sent;
 }
 
@@ -1355,6 +1409,7 @@ async function syncSingleChannelMessage(
         await msg.edit(payload);
         config.updatedAt = Date.now();
         saveStockConfigs();
+        void syncStockMessageReactions(msg, globalStock.fruits.length > 0);
         return;
       }
     }
@@ -1363,6 +1418,7 @@ async function syncSingleChannelMessage(
     config.activeMessageId = sent.id;
     config.updatedAt = Date.now();
     saveStockConfigs();
+    void syncStockMessageReactions(sent, globalStock.fruits.length > 0);
   } catch (error) {
     console.error(`[Stock] Failed to sync stock message in channel ${config.channelId}:`, error);
   } finally {
@@ -1560,6 +1616,9 @@ async function adoptOrEnsureChannelStockMessage(
             globalStock.updatedAt = Date.now();
             saveStockConfigs();
           }
+          if (extracted.fruits.length > 0 || globalStock.fruits.length > 0) {
+            void syncStockMessageReactions(existing, true);
+          }
           return;
         }
       }
@@ -1582,6 +1641,9 @@ async function adoptOrEnsureChannelStockMessage(
             globalStock.updatedAt = Date.now();
           }
           saveStockConfigs();
+          if (extracted.fruits.length > 0 || globalStock.fruits.length > 0) {
+            void syncStockMessageReactions(msg, true);
+          }
           return;
         }
       }
@@ -2178,6 +2240,7 @@ export async function handleStockModalSubmit(
     saveStockConfigs();
 
     const { payload } = await buildPayloadForChannel(interaction.client, config, false);
+    let targetMessage: Message | null = interaction.message ?? null;
     if (interaction.isFromMessage()) {
       await interaction.update(payload);
     } else {
@@ -2187,12 +2250,16 @@ export async function handleStockModalSubmit(
         const msg = await channel.messages.fetch(config.activeMessageId).catch(() => null);
         if (msg && msg.editable) {
           await msg.edit(payload);
+          targetMessage = msg;
         }
       }
       await interaction.deleteReply().catch(() => null);
     }
 
-    // Mirror updated stock to all follower servers immediately
+    // Add <:Win:...> and <:loss:...> reactions to the main stock message now that fruits are set
+    void syncStockMessageReactions(targetMessage, globalStock.fruits.length > 0);
+
+    // Mirror updated stock (and reactions) to all follower servers immediately
     void syncAllFollowerStockMessages(interaction.client);
 
     const notes: string[] = [];
@@ -2234,6 +2301,7 @@ export async function handleStockModalSubmit(
   saveStockConfigs();
 
   const { payload } = await buildPayloadForChannel(interaction.client, config, false);
+  let targetMessage: Message | null = interaction.message ?? null;
   if (interaction.isFromMessage()) {
     await interaction.update(payload);
   } else {
@@ -2243,10 +2311,14 @@ export async function handleStockModalSubmit(
       const msg = await channel.messages.fetch(config.activeMessageId).catch(() => null);
       if (msg && msg.editable) {
         await msg.edit(payload);
+        targetMessage = msg;
       }
     }
     await interaction.deleteReply().catch(() => null);
   }
+
+  // Keep Win/loss reactions synced depending on whether fruits remain in stock
+  void syncStockMessageReactions(targetMessage, globalStock.fruits.length > 0);
 
   // Mirror updated stock to all follower servers immediately
   void syncAllFollowerStockMessages(interaction.client);
