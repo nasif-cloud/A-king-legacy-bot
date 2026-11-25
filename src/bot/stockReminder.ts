@@ -1987,6 +1987,59 @@ export async function handleStockSetCommand(
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+  // Check if this channel already has stock reminders enabled; running /stockset again removes it
+  let existingInChannel = stockStore.get(interaction.channelId);
+  if (!existingInChannel && interaction.client.user?.id) {
+    const recent = await channel.messages.fetch({ limit: 15 }).catch(() => null);
+    if (recent) {
+      const botId = interaction.client.user.id;
+      const ordered = [...recent.values()].sort(
+        (a, b) => b.createdTimestamp - a.createdTimestamp,
+      );
+      for (const msg of ordered) {
+        const extracted = extractStockStateFromMessage(msg, botId);
+        if (extracted) {
+          existingInChannel = {
+            guildId: interaction.guildId,
+            channelId: interaction.channelId,
+            isMain: extracted.isMain,
+            activeMessageId: msg.id,
+            updatedAt: extracted.createdTimestamp,
+          };
+          break;
+        }
+      }
+    }
+  }
+
+  if (existingInChannel) {
+    stockStore.delete(interaction.channelId);
+    saveStockConfigs();
+    armNextCycleTimer(interaction.client);
+
+    // Delete the active stock message so it's removed cleanly and won't be re-recovered on restart
+    let removedActiveMsg = false;
+    if (existingInChannel.activeMessageId) {
+      const activeMsg = await channel.messages
+        .fetch(existingInChannel.activeMessageId)
+        .catch(() => null);
+      if (activeMsg) {
+        removedActiveMsg = await activeMsg
+          .delete()
+          .then(() => true)
+          .catch(() => false);
+      }
+    }
+    if (!removedActiveMsg) {
+      await expireStockMessageIfPresent(interaction.client, existingInChannel);
+    }
+
+    await interaction.editReply({
+      content: `Stock reminders removed from <#${interaction.channelId}>.`,
+    });
+    return;
+  }
+
   const isMain = interaction.user.id === BOT_OWNER_ID;
 
   // Sync cycle bounds if stale before posting
@@ -2001,18 +2054,13 @@ export async function handleStockSetCommand(
     };
   }
 
-  // If setting a new main channel, expire the old main channel's dropdown cleanly
+  // If setting a new main channel, expire any old main channel's dropdown in another channel
   if (isMain) {
     for (const prev of stockStore.values()) {
       if (prev.isMain) {
         await expireStockMessageIfPresent(interaction.client, prev);
         prev.isMain = false;
       }
-    }
-  } else {
-    const existing = stockStore.get(interaction.channelId);
-    if (existing) {
-      await expireStockMessageIfPresent(interaction.client, existing);
     }
   }
 
@@ -2424,7 +2472,7 @@ export function buildStockPingsContainer(
   const fruitMenuRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new StringSelectMenuBuilder()
-        .setCustomId(`stk_ping_fruit:${session.id}:${session.revision}`)
+        .setCustomId(`stk_ping_fruit:${session.userId}:${selectedFruit.id}:${safePage}`)
         .setPlaceholder(`choose a fruit (page ${safePage + 1}/${totalPages})`)
         .addOptions(fruitOptions),
     );
@@ -2433,7 +2481,7 @@ export function buildStockPingsContainer(
   const roleMenuRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new RoleSelectMenuBuilder()
-        .setCustomId(`stk_ping_role:${session.id}:${session.revision}`)
+        .setCustomId(`stk_ping_role:${session.userId}:${selectedFruit.id}:${safePage}`)
         .setPlaceholder(`type or choose role for ${selectedFruit.name}`)
         .setMinValues(1)
         .setMaxValues(1),
@@ -2442,7 +2490,7 @@ export function buildStockPingsContainer(
   const buttonRow =
     new ActionRowBuilder<MessageActionRowComponentBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(`stk_ping_btn:page:${session.id}`)
+        .setCustomId(`stk_ping_btn:page:${session.userId}:${selectedFruit.id}:${safePage}`)
         .setLabel(
           safePage === 0
             ? `Fruits Page 1/${totalPages} ▶`
@@ -2450,7 +2498,7 @@ export function buildStockPingsContainer(
         )
         .setStyle(ButtonStyle.Secondary),
       new ButtonBuilder()
-        .setCustomId(`stk_ping_btn:clear:${session.id}`)
+        .setCustomId(`stk_ping_btn:clear:${session.userId}:${selectedFruit.id}:${safePage}`)
         .setLabel('Remove Ping')
         .setStyle(ButtonStyle.Danger)
         .setDisabled(!selectedRoleId),
@@ -2473,6 +2521,97 @@ export function buildStockPingsContainer(
     .addActionRowComponents(fruitMenuRow)
     .addActionRowComponents(roleMenuRow)
     .addActionRowComponents(buttonRow);
+}
+
+// Resolves stateless /stockpings UI state from customId (never expires across restarts or deploys)
+function resolveStockPingState(
+  interaction: StringSelectMenuInteraction | RoleSelectMenuInteraction | ButtonInteraction,
+  isButton = false,
+): { action?: string; session: StockPingSession } | null {
+  if (!interaction.guildId) return null;
+
+  const parts = interaction.customId.split(':');
+  const totalPages = Math.ceil(FRUITS_PICKER_ORDER.length / FRUITS_PER_PAGE);
+
+  if (isButton) {
+    // New stateless format: stk_ping_btn:<action>:<userId>:<selectedFruitId>:<page>
+    if (parts.length >= 5 && FRUIT_BY_ID.has(parts[3])) {
+      const action = parts[1];
+      const userId = parts[2];
+      const selectedFruitId = parts[3];
+      const pageNum = Number(parts[4]);
+      return {
+        action,
+        session: {
+          id: userId,
+          userId,
+          guildId: interaction.guildId,
+          selectedFruitId,
+          page: Number.isFinite(pageNum)
+            ? Math.max(0, Math.min(pageNum, totalPages - 1))
+            : 0,
+          revision: 0,
+          createdAt: Date.now(),
+        },
+      };
+    }
+
+    // Legacy 3-part format: stk_ping_btn:<action>:<sessionId>
+    const action = parts[1];
+    const legacy = stockPingSessions.get(parts[2]);
+    if (legacy) {
+      return { action, session: legacy };
+    }
+    return {
+      action,
+      session: {
+        id: interaction.user.id,
+        userId: interaction.user.id,
+        guildId: interaction.guildId,
+        selectedFruitId: 'dragon',
+        page: 0,
+        revision: 0,
+        createdAt: Date.now(),
+      },
+    };
+  }
+
+  // New stateless select format: stk_ping_<fruit|role>:<userId>:<selectedFruitId>:<page>
+  if (parts.length >= 4 && FRUIT_BY_ID.has(parts[2])) {
+    const userId = parts[1];
+    const selectedFruitId = parts[2];
+    const pageNum = Number(parts[3]);
+    return {
+      session: {
+        id: userId,
+        userId,
+        guildId: interaction.guildId,
+        selectedFruitId,
+        page: Number.isFinite(pageNum)
+          ? Math.max(0, Math.min(pageNum, totalPages - 1))
+          : 0,
+        revision: 0,
+        createdAt: Date.now(),
+      },
+    };
+  }
+
+  // Legacy 3-part format: stk_ping_<fruit|role>:<sessionId>:<revision>
+  const legacy = stockPingSessions.get(parts[1]);
+  if (legacy) {
+    return { session: legacy };
+  }
+  return {
+    session: {
+      id: interaction.user.id,
+      userId: interaction.user.id,
+      guildId: interaction.guildId,
+      selectedFruitId: 'dragon',
+      page: 0,
+      revision: 0,
+      createdAt: Date.now(),
+    },
+  };
 }
 
 // Handles /stockpings for server owners (and bot owner) per guild
@@ -2518,16 +2657,16 @@ export async function handleStockPingsCommand(
 export async function handleStockPingsFruitSelect(
   interaction: StringSelectMenuInteraction,
 ): Promise<void> {
-  const sessionId = interaction.customId.split(':')[1];
-  const session = stockPingSessions.get(sessionId);
-  if (!session) {
+  const resolved = resolveStockPingState(interaction, false);
+  if (!resolved) {
     await interaction.reply({
-      content: 'This `/stockpings` menu expired. Run `/stockpings` again.',
+      content: 'Run `/stockpings` inside a server to configure its stock ping roles.',
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
+  const { session } = resolved;
   if (interaction.user.id !== session.userId && !isGuildOwnerOrBotOwner(interaction)) {
     await interaction.reply({
       content: 'Only the server owner can modify stock pings.',
@@ -2551,16 +2690,16 @@ export async function handleStockPingsFruitSelect(
 export async function handleStockPingsRoleSelect(
   interaction: RoleSelectMenuInteraction,
 ): Promise<void> {
-  const sessionId = interaction.customId.split(':')[1];
-  const session = stockPingSessions.get(sessionId);
-  if (!session) {
+  const resolved = resolveStockPingState(interaction, false);
+  if (!resolved) {
     await interaction.reply({
-      content: 'This `/stockpings` menu expired. Run `/stockpings` again.',
+      content: 'Run `/stockpings` inside a server to configure its stock ping roles.',
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
+  const { session } = resolved;
   if (interaction.user.id !== session.userId && !isGuildOwnerOrBotOwner(interaction)) {
     await interaction.reply({
       content: 'Only the server owner can modify stock pings.',
@@ -2583,16 +2722,16 @@ export async function handleStockPingsRoleSelect(
 export async function handleStockPingsButton(
   interaction: ButtonInteraction,
 ): Promise<void> {
-  const [, action, sessionId] = interaction.customId.split(':');
-  const session = stockPingSessions.get(sessionId);
-  if (!session) {
+  const resolved = resolveStockPingState(interaction, true);
+  if (!resolved) {
     await interaction.reply({
-      content: 'This `/stockpings` menu expired. Run `/stockpings` again.',
+      content: 'Run `/stockpings` inside a server to configure its stock ping roles.',
       flags: MessageFlags.Ephemeral,
     });
     return;
   }
 
+  const { action, session } = resolved;
   if (interaction.user.id !== session.userId && !isGuildOwnerOrBotOwner(interaction)) {
     await interaction.reply({
       content: 'Only the server owner can modify stock pings.',
