@@ -50,11 +50,20 @@ import {
   reconcileStockChannels,
   syncMissingFruitEmojis,
 } from './stockReminder.js';
+import {
+  handleServListButton,
+  handleServListMessage,
+  loadBotActivity,
+  seedBotActivity,
+  trackBotInteraction,
+  trackBotMessageCreate,
+} from './servList.js';
 
-// Claim local lockfile leadership and load saved sticky messages & stock configs on startup
+// Claim local lockfile leadership and load saved sticky messages, stock configs & server activity on startup
 claimLocalLeadership();
 loadStickyMessages();
 loadStockConfigs();
+loadBotActivity();
 
 // Prefer IPv4 DNS resolution on cloud hosts (Railway, etc.)
 dns.setDefaultResultOrder('ipv4first');
@@ -131,6 +140,9 @@ client.once(Events.ClientReady, async (readyClient) => {
   void syncTradesFromChannels(readyClient, true).then((count) => {
     console.log(`Indexed ${count} messages from trading channels.`);
   });
+
+  // Seed 14-day bot activity for servers not yet seeded on disk
+  void seedBotActivity(readyClient);
 });
 
 // Register commands and index channels whenever the bot joins a new server
@@ -148,16 +160,19 @@ client.on(Events.GuildCreate, async (guild) => {
   void syncTradesFromChannels(client, true);
   void reconcileStickyMessages(client, guild.id);
   void reconcileStockChannels(client, guild.id);
+  void seedBotActivity(client, guild.id);
 });
 
 client.on(Events.GuildDelete, () => {
   updateBotPresence(client);
 });
 
-// Keep trade cache and sticky messages updated live as messages are posted
+// Keep trade cache, sticky messages, bot message counts & owner prefix commands updated live
 client.on(Events.MessageCreate, (message) => {
   indexSingleMessage(message);
   handleStickyMessageCreate(message);
+  trackBotMessageCreate(message);
+  void handleServListMessage(message);
 });
 
 client.on(Events.MessageUpdate, async (_oldMsg, newMsg) => {
@@ -192,10 +207,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleWinLossButton(interaction);
       } else if (interaction.customId.startsWith('stk_ping_btn:')) {
         await handleStockPingsButton(interaction);
+      } else if (interaction.customId.startsWith('klsrv:')) {
+        await handleServListButton(interaction);
       } else {
         await handleSearchButton(interaction);
       }
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
       return;
     }
 
@@ -208,6 +226,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleSearchSelectMenu(interaction);
       }
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
       return;
     }
 
@@ -216,6 +235,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleStockPingsRoleSelect(interaction);
       }
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
       return;
     }
 
@@ -228,6 +248,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await handleSearchModalSubmit(interaction);
       }
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
       return;
     }
 
@@ -247,24 +268,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.commandName === 'value') {
       await handleValueCommand(interaction);
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
     } else if (interaction.commandName === 'trade') {
       await handleSearchCommand(interaction);
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
     } else if (interaction.commandName === 'stickymessage') {
       await handleStickyAddCommand(interaction);
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
     } else if (interaction.commandName === 'stickmessage') {
       await handleStickyRemoveCommand(interaction);
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
     } else if (interaction.commandName === 'wl') {
       await handleWinLossCommand(interaction);
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
     } else if (interaction.commandName === 'stockset') {
       await handleStockSetCommand(interaction);
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
     } else if (interaction.commandName === 'stockpings') {
       await handleStockPingsCommand(interaction);
       confirmActiveLeadership();
+      trackBotInteraction(interaction);
     }
   } catch (error) {
     const code = (error as { code?: number })?.code;

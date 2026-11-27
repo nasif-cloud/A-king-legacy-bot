@@ -10,3 +10,5 @@ coverage/
 .stock-config.json
 .stock-pings.json
 .stock-emojis.json
+.bot-message-counts.json
+.bot-activity.json
